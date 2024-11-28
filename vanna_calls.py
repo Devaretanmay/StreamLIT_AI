@@ -27,8 +27,7 @@ PREDEFINED_QUERIES = {
                 AVG(tr.tag_value) as avg_consumption,
                 COUNT(*) as reading_count
             FROM tag_readings tr
-            JOIN tags t ON tr.tag_id = t.tag_id
-            JOIN tag_masters tm ON t.tag_id = tm.tag_id
+            JOIN tags t ON tr.tag_id = t.id
             WHERE EXTRACT(MONTH FROM tr.date_time) IN (9, 10)
             AND EXTRACT(YEAR FROM tr.date_time) = EXTRACT(YEAR FROM CURRENT_DATE)
             GROUP BY tr.tag_id, t.tag_name, EXTRACT(MONTH FROM tr.date_time)
@@ -49,8 +48,7 @@ PREDEFINED_QUERIES = {
             AVG(tr.tag_value) as daily_consumption,
             COUNT(*) as readings_per_day
         FROM tag_readings tr
-        JOIN tags t ON tr.tag_id = t.tag_id
-        JOIN tag_masters tm ON t.tag_id = tm.tag_id
+        JOIN tags t ON tr.tag_id = t.id
         WHERE tr.date_time BETWEEN 
             DATE_TRUNC('month', CURRENT_DATE - INTERVAL '2 months')
             AND DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day'
@@ -66,7 +64,7 @@ PREDEFINED_QUERIES = {
                 AVG(tr.tag_value) as avg_consumption,
                 COUNT(*) as reading_count
             FROM tag_readings tr
-            JOIN tags t ON tr.tag_id = t.tag_id
+            JOIN tags t ON tr.tag_id = t.id
             WHERE tr.date_time >= CURRENT_DATE - INTERVAL '30 days'
             GROUP BY DATE_TRUNC('day', tr.date_time), t.tag_name
         )
@@ -97,8 +95,7 @@ PREDEFINED_QUERIES = {
                 AVG(tr.tag_value) as avg_consumption,
                 COUNT(*) as reading_count
             FROM tag_readings tr
-            JOIN tags t ON tr.tag_id = t.tag_id
-            JOIN tag_masters tm ON t.tag_id = tm.tag_id
+            JOIN tags t ON tr.tag_id = t.id
             WHERE tr.date_time >= DATE_TRUNC('week', CURRENT_DATE - INTERVAL '1 week')
             GROUP BY tr.tag_id, t.tag_name, week_period
         )
@@ -121,7 +118,7 @@ PREDEFINED_QUERIES = {
                 COUNT(*) as reading_count,
                 STDDEV(tr.tag_value) as consumption_variation
             FROM tag_readings tr
-            JOIN tags t ON tr.tag_id = t.tag_id
+            JOIN tags t ON tr.tag_id = t.id
             WHERE EXTRACT(HOUR FROM tr.date_time) BETWEEN 9 AND 17
             AND tr.date_time >= CURRENT_DATE - INTERVAL '30 days'
             GROUP BY tr.tag_id, t.tag_name, EXTRACT(HOUR FROM tr.date_time)
@@ -147,7 +144,7 @@ QUERY_TEMPLATES = {
                 AVG(tr.tag_value) as avg_consumption,
                 COUNT(*) as reading_count
             FROM tag_readings tr
-            JOIN tags t ON tr.tag_id = t.tag_id
+            JOIN tags t ON tr.tag_id = t.id
             WHERE {time_condition}
             GROUP BY tr.tag_id, t.tag_name, {time_extract}
         )
@@ -168,7 +165,7 @@ QUERY_TEMPLATES = {
             COUNT(*) as readings,
             STDDEV(tr.tag_value) as consumption_variation
         FROM tag_readings tr
-        JOIN tags t ON tr.tag_id = t.tag_id
+        JOIN tags t ON tr.tag_id = t.id
         WHERE {time_filter}
         GROUP BY {time_grouping}, t.tag_name
         ORDER BY {time_grouping}, tag_name;
@@ -368,33 +365,26 @@ class EnergyQueryEngine(VannaDefault):
                 st.error("System is too busy. Please try again later.")
                 return None
             
-            # Create prompt with templates
+            # Create prompt with updated schema information
             prompt = f"""
             Given this database schema:
-            {self._schema_context}
+            Tables:
+            - tag_readings (id, tag_id, date_time, tag_value, utilities_id)
+            - tags (id, tag_name, utilities_id)
             
-            And these query templates:
-            1. Time Comparison Template:
-            {QUERY_TEMPLATES['time_comparison']}
-            
-            2. Daily Pattern Template:
-            {QUERY_TEMPLATES['daily_pattern']}
+            Key relationships:
+            - tag_readings.tag_id references tags.id
             
             Generate a SQL query for: "{question}"
             
             Rules:
-            1. Use the appropriate template based on the question type
-            2. For time comparisons, use:
-               - EXTRACT(HOUR FROM date_time) for hourly
-               - DATE_TRUNC('day', date_time) for daily
-               - EXTRACT(MONTH FROM date_time) for monthly
-            3. Always join with tags table to get tag names
-            4. Include reading counts for data quality
-            5. Add STDDEV for variation analysis where appropriate
-            6. Use WHERE conditions to limit time ranges
-            7. Order results logically
+            1. Use proper JOIN syntax: JOIN tags t ON tr.tag_id = t.id
+            2. Include tag_name from tags table for readability
+            3. Use appropriate time functions (EXTRACT, DATE_TRUNC) for time analysis
+            4. Include COUNT(*) for data quality checks
+            5. Order results logically
+            6. Use meaningful column aliases
             
-            The query should be executable PostgreSQL.
             Return only the SQL query, no explanations.
             """
             
@@ -553,25 +543,62 @@ def get_database_schema():
         print(f"Error getting schema: {str(e)}")
         return None
 
+def save_schema_to_file():
+    """Save the complete database schema to schema.txt"""
+    try:
+        conn = psycopg2.connect(
+            host=st.secrets["POSTGRES_HOST"],
+            database=st.secrets["POSTGRES_DB"],
+            user=st.secrets["POSTGRES_USER"],
+            password=st.secrets["POSTGRES_PASSWORD"],
+            port=st.secrets["POSTGRES_PORT"]
+        )
+        
+        # Get schema information using the existing query
+        df = pd.read_sql(get_schema_info.__doc__, conn)
+        conn.close()
+        
+        with open('schema.txt', 'w') as f:
+            f.write("# Database Schema Documentation\n\n")
+            
+            # Write Tables and Columns
+            f.write("## Tables and Columns\n\n")
+            for table in df['tables'][0]:
+                f.write(f"### Table: {table['table_name']}\n")
+                for column in table['columns']:
+                    nullable = "NULL" if column['is_nullable'] == 'YES' else "NOT NULL"
+                    default = f" DEFAULT {column['column_default']}" if column['column_default'] else ""
+                    f.write(f"- {column['column_name']} ({column['data_type']}) {nullable}{default}\n")
+                f.write("\n")
+            
+            # Write Foreign Key Relationships
+            if df['foreign_keys'][0]:
+                f.write("## Foreign Key Relationships\n\n")
+                for fk in df['foreign_keys'][0]:
+                    f.write(f"- {fk['table_name']}.{fk['column_name']} → {fk['foreign_table_name']}.{fk['foreign_column_name']}\n")
+                f.write("\n")
+            
+            # Write Primary Keys
+            if df['primary_keys'][0]:
+                f.write("## Primary Keys\n\n")
+                for pk in df['primary_keys'][0]:
+                    f.write(f"- {pk['table_name']}: {pk['column_name']}\n")
+                f.write("\n")
+            
+    except Exception as e:
+        print(f"Error saving schema: {str(e)}")
+
 @st.cache_resource
 def setup_vanna():
     """Initialize Vanna with resource checks"""
-    # Print schema first
-    print("\n=== DATABASE SCHEMA ===")
-    schema_df = get_schema_info()
-    if schema_df is not None:
-        for _, row in schema_df.iterrows():
-            print(f"\n{row['table_name']}.{row['column_name']}")
-            print(f"  Type: {row['data_type']}")
-            print(f"  Nullable: {row['is_nullable']}")
-    print("\n====================\n")
+    save_schema_to_file()  # Quietly save schema to file
     
     if check_cpu_usage() or check_memory_usage():
         st.info("System is busy, waiting for resources...")
         if not wait_for_cpu_cooldown():
             st.error("System resources are exhausted. Please try again later.")
             return None
-        
+    
     db_config = {
         "host": st.secrets["POSTGRES_HOST"],
         "database": st.secrets["POSTGRES_DB"],
@@ -642,17 +669,57 @@ def process_query(query):
         time.sleep(0.5)
 
 def get_schema_info():
-    """Get detailed schema information for query optimization"""
+    """Get detailed schema information including tables, columns, and relationships"""
     schema_query = """
     SELECT 
-        table_name,
-        column_name,
-        data_type,
-        is_nullable
-    FROM information_schema.columns 
-    WHERE table_schema = 'public'
-    AND table_name IN ('tag_readings', 'tags', 'tag_masters', 'meter_details', 'consumer_details')
-    ORDER BY table_name, ordinal_position;
+        -- Get tables
+        (SELECT json_agg(table_info)
+         FROM (
+             SELECT table_name, 
+                    (SELECT json_agg(column_info)
+                     FROM (
+                         SELECT column_name, 
+                                data_type,
+                                is_nullable,
+                                column_default
+                         FROM information_schema.columns c2
+                         WHERE c2.table_name = c1.table_name
+                         ORDER BY ordinal_position
+                     ) column_info
+                    ) as columns
+             FROM information_schema.tables c1
+             WHERE table_schema = 'public'
+             AND table_type = 'BASE TABLE'
+         ) table_info
+        ) as tables,
+        
+        -- Get foreign keys
+        (SELECT json_agg(constraint_info)
+         FROM (
+             SELECT tc.table_name,
+                    kcu.column_name,
+                    ccu.table_name AS foreign_table_name,
+                    ccu.column_name AS foreign_column_name
+             FROM information_schema.table_constraints tc
+             JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+             JOIN information_schema.constraint_column_usage ccu
+                  ON ccu.constraint_name = tc.constraint_name
+             WHERE tc.constraint_type = 'FOREIGN KEY'
+         ) constraint_info
+        ) as foreign_keys,
+        
+        -- Get primary keys
+        (SELECT json_agg(pk_info)
+         FROM (
+             SELECT kcu.table_name,
+                    kcu.column_name
+             FROM information_schema.table_constraints tc
+             JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+             WHERE tc.constraint_type = 'PRIMARY KEY'
+         ) pk_info
+        ) as primary_keys
     """
     
     try:
@@ -664,9 +731,40 @@ def get_schema_info():
             port=st.secrets["POSTGRES_PORT"]
         )
         
+        # Execute the schema query
         df = pd.read_sql(schema_query, conn)
         conn.close()
+        
+        # Print the schema information in a readable format
+        st.write("### Database Schema")
+        
+        if df.empty:
+            st.error("No schema information found")
+            return None
+            
+        # Print Tables and Columns
+        st.write("#### Tables and Columns:")
+        for table in df['tables'][0]:
+            st.write(f"\n**Table: {table['table_name']}**")
+            for column in table['columns']:
+                nullable = "NULL" if column['is_nullable'] == 'YES' else "NOT NULL"
+                default = f" DEFAULT {column['column_default']}" if column['column_default'] else ""
+                st.write(f"- {column['column_name']} ({column['data_type']}) {nullable}{default}")
+        
+        # Print Foreign Keys
+        if df['foreign_keys'][0]:
+            st.write("\n#### Foreign Key Relationships:")
+            for fk in df['foreign_keys'][0]:
+                st.write(f"- {fk['table_name']}.{fk['column_name']} → {fk['foreign_table_name']}.{fk['foreign_column_name']}")
+        
+        # Print Primary Keys
+        if df['primary_keys'][0]:
+            st.write("\n#### Primary Keys:")
+            for pk in df['primary_keys'][0]:
+                st.write(f"- {pk['table_name']}: {pk['column_name']}")
+        
         return df
+        
     except Exception as e:
         st.error(f"Error getting schema: {str(e)}")
-        return None re
+        return None

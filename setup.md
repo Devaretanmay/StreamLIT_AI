@@ -19,7 +19,7 @@ pip install vanna>=0.7.5 streamlit python-dotenv psycopg2-binary pandas plotly
 ## 3. Configure Environment Variables
 Create a `.env` file in the root directory:
 ```bash
-
+pip install -r requirements.txt
 streamlit run app.py
 ```
 
