@@ -388,11 +388,16 @@ class EnergyQueryEngine(VannaDefault):
             Return only the SQL query, no explanations.
             """
             
+            print(f"\nSending prompt to Ollama:\n{prompt}\n")  # Debug print
+            
             # Get response from Ollama with retries
             for attempt in range(MAX_RETRIES):
+                print(f"Attempt {attempt + 1} of {MAX_RETRIES}")  # Debug print
                 response = self._get_ollama_response(prompt)
                 if response:
+                    print(f"Got response:\n{response}\n")  # Debug print
                     break
+                print(f"Attempt {attempt + 1} failed, retrying...")  # Debug print
                 sleep(1 * (attempt + 1))
             
             if not response:
@@ -401,6 +406,8 @@ class EnergyQueryEngine(VannaDefault):
             
             # Extract and validate SQL
             sql = self._extract_sql(response)
+            print(f"Extracted SQL:\n{sql}\n")  # Debug print
+            
             if sql and self._validate_sql(sql):
                 return sql
             return None
@@ -410,7 +417,7 @@ class EnergyQueryEngine(VannaDefault):
             return None
 
     def _get_ollama_response(self, prompt):
-        """Get response from Ollama"""
+        """Get response from Ollama with better error handling"""
         import requests
         import json
         
@@ -421,11 +428,31 @@ class EnergyQueryEngine(VannaDefault):
                     "model": "phi",
                     "prompt": prompt,
                     "stream": False
-                }
+                },
+                timeout=30  # Add timeout
             )
-            return response.json()['response']
+            
+            # Check if request was successful
+            response.raise_for_status()
+            
+            # Parse response
+            response_data = response.json()
+            
+            # Check if response contains the expected field
+            if 'response' not in response_data:
+                print(f"Unexpected response format: {response_data}")
+                return None
+            
+            return response_data['response']
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Request error: {str(e)}")
+            return None
+        except json.JSONDecodeError as e:
+            print(f"JSON decode error: {str(e)}")
+            return None
         except Exception as e:
-            st.error(f"Error calling Ollama: {str(e)}")
+            print(f"Unexpected error: {str(e)}")
             return None
 
     def _extract_sql(self, response):
